@@ -1,0 +1,23 @@
+[package]
+name = "spanspector-example-cli"
+description = "Example: instrument a small command with SpanSpector and emit JSONL evidence."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "spanspector-example-cli"
+path = "src/main.rs"
+
+[dependencies]
+spanspector-schema.workspace = true
+spanspector-tracing.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

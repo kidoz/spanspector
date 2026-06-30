@@ -1,0 +1,25 @@
+[package]
+name = "spanspector-cli"
+description = "SpanSpector CLI: validate, summarize, search, and serve trace evidence."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "spanspector"
+path = "src/main.rs"
+
+[dependencies]
+spanspector-core.workspace = true
+spanspector-schema.workspace = true
+spanspector-mcp.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,50 @@
+# SpanSpector workspace — AI-ready tracing diagnostics for Rust.
+#
+# Virtual workspace: dependency versions, package metadata, and lint policy are
+# centralized here and inherited by every member crate (see RUST_CODE_DECOMPOSITION).
+[workspace]
+resolver = "3"
+members = [
+    "crates/spanspector-core",
+    "crates/spanspector-schema",
+    "crates/spanspector-tracing",
+    "crates/spanspector-mcp",
+    "crates/spanspector-cli",
+    "examples/cli-command",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/kidoz/spanspector"
+authors = ["Aleksandr Pavlov <ckidoz@gmail.com>"]
+
+[workspace.dependencies]
+# Internal crates, referenced by path; versioned in lockstep, never published.
+spanspector-core = { path = "crates/spanspector-core", version = "0.1.0" }
+spanspector-schema = { path = "crates/spanspector-schema", version = "0.1.0" }
+spanspector-tracing = { path = "crates/spanspector-tracing", version = "0.1.0" }
+spanspector-mcp = { path = "crates/spanspector-mcp", version = "0.1.0" }
+
+# Third-party, shared across members.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+tracing = "0.1.41"
+tracing-core = "0.1.34"
+tracing-subscriber = { version = "0.3.20", features = ["registry", "std"] }
+clap = { version = "4.5.51", features = ["derive"] }
+anyhow = "1.0.100"
+
+# Shared lint policy. `unreachable_pub` keeps the public facade honest;
+# `missing_docs` keeps the library API documented.
+[workspace.lints.rust]
+unreachable_pub = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
