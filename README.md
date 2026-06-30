@@ -25,10 +25,12 @@ bugs or vulnerabilities.
 | `spanspector-mcp` | A safe, local MCP-style server: read-only resources and allowlisted tools. |
 | `spanspector-cli` | The `spanspector` CLI: `validate`, `summarize`, `search`, `serve`. |
 | `examples/cli-command` | A tiny instrumented command that emits example evidence. |
+| `examples/server-integration` | Compose SpanSpector with a `fmt` subscriber + per-layer filter, like a server. |
 
 Docs: [`docs/trace-schema.md`](docs/trace-schema.md),
 [`docs/mcp-tools.md`](docs/mcp-tools.md), [`docs/security.md`](docs/security.md),
-[`docs/performance.md`](docs/performance.md).
+[`docs/performance.md`](docs/performance.md),
+[`docs/integration.md`](docs/integration.md).
 
 ## Quick start
 
@@ -63,6 +65,30 @@ Each closed span and each event becomes one JSONL line. Sensitive field keys
 (`auth.token`, `password`, `api_key`, …) are redacted to a class + digest before
 they are ever written. See [`docs/trace-schema.md`](docs/trace-schema.md) for the
 full event shape.
+
+The `Arc<Mutex<_>>` sink above writes inline and is meant for tests and CLIs. For
+a **server**, use the non-blocking writer so evidence never blocks a request:
+
+```rust
+use spanspector_tracing::EvidenceBuilder;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+let evidence = EvidenceBuilder::new()
+    .runs_dir("var/spanspector")   // -> var/spanspector/<run_id>/trace.jsonl
+    .crate_name("nodus_server")
+    .build()?;                     // non-blocking writer + RunMetadata, wired up
+
+tracing_subscriber::registry().with(evidence.layer).init();
+// ... run the program ...
+evidence.guard.shutdown()?;        // flush, drain, and report dropped records
+# Ok::<(), std::io::Error>(())
+```
+
+Composing with an existing `fmt`/OTLP subscriber, per-layer filtering, the
+shutdown/drop contract, and extending redaction with domain-specific keys are all
+covered in [`docs/integration.md`](docs/integration.md), with a runnable
+[`examples/server-integration`](examples/server-integration/src/main.rs).
 
 ### 2. Run the example
 
@@ -103,6 +129,13 @@ cargo test --workspace
 
 Generate evidence in CI by setting `RUST_LOG` and pointing the layer at a file
 per run id, then run `spanspector validate` and `spanspector summarize` as a gate.
+
+The workspace crates are `publish = false` and consumed as a pinned git
+dependency; the `just git-consumer-smoke` recipe (see the [`justfile`](justfile))
+builds a throwaway crate against a given revision to keep that mode working, and
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs it alongside fmt,
+clippy, and tests. Run the full local gate with `just ci`. See
+[`docs/integration.md`](docs/integration.md).
 
 ## Schema versioning
 
