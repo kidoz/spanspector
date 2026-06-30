@@ -346,6 +346,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spanspector-example-server"
+version = "0.1.0"
+dependencies = [
+ "spanspector-tracing",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "spanspector-mcp"
 version = "0.1.0"
 dependencies = [

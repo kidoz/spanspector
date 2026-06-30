@@ -11,6 +11,7 @@ members = [
     "crates/spanspector-mcp",
     "crates/spanspector-cli",
     "examples/cli-command",
+    "examples/server-integration",
 ]
 
 [workspace.package]
