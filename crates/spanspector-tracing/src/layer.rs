@@ -1,12 +1,11 @@
 //! The [`SpanSpectorLayer`] tracing-subscriber layer.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use spanspector_core::RunMetadata;
+use spanspector_core::{RedactionPolicy, RunMetadata};
 use spanspector_schema::{
     EventKind, EventStatus, FieldValue, Level, SourceLocation, TraceEvent, TraceRecord,
     to_jsonl_line,
@@ -17,6 +16,7 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::visitor::FieldCollector;
+use crate::writer::RecordWriter;
 
 /// Per-span state cached in the registry between open and close.
 struct SpanState {
@@ -32,10 +32,14 @@ struct SpanState {
 }
 
 /// A `tracing` layer that converts spans and events into `spanspector-trace/v1`
-/// JSONL records written to a shared writer.
+/// JSONL records written to a [`RecordWriter`] sink.
 ///
-/// Construct it with a [`RunMetadata`] and any [`Write`] sink, then compose it
-/// onto a [`tracing_subscriber::Registry`]:
+/// Construct it with a [`RunMetadata`] and a sink, then compose it onto a
+/// [`tracing_subscriber::Registry`]. Any `Arc<Mutex<W>>` over a [`Write`] is a
+/// valid sink (synchronous, ordered); for server paths that must never block on
+/// I/O, use [`crate::non_blocking_jsonl`] or [`crate::NonBlockingWriter`].
+///
+/// [`Write`]: std::io::Write
 ///
 /// ```
 /// use std::sync::{Arc, Mutex};
@@ -61,26 +65,32 @@ struct SpanState {
 ///
 /// ## Overhead
 ///
-/// Each record is serialized and written while holding a single [`Mutex`] around
-/// the writer, so emission is synchronous and ordered. Field maps are captured
-/// once per span (plus any `record` updates) and the run metadata is shared
-/// behind an [`Arc`]; the per-event cost is one clone of the small run metadata
-/// and one JSON serialization. Writes are best-effort: a failing writer drops the
-/// record rather than panicking inside the tracing callback.
+/// Each record is serialized and handed to the sink's [`RecordWriter::write_line`].
+/// Field maps are captured once per span (plus any `record` updates) and the run
+/// metadata is shared behind an [`Arc`]; the per-event cost is one clone of the
+/// small run metadata and one JSON serialization. Writes are best-effort: a
+/// failing sink drops the record rather than panicking inside the tracing
+/// callback. Whether emission blocks the calling thread is a property of the
+/// sink — an `Arc<Mutex<W>>` writes inline; [`NonBlockingWriter`] hands the line
+/// to a background thread.
+///
+/// [`NonBlockingWriter`]: crate::NonBlockingWriter
 pub struct SpanSpectorLayer<W> {
     run: Arc<RunMetadata>,
-    writer: Arc<Mutex<W>>,
+    writer: W,
     emit_span_started: bool,
+    redaction: Arc<RedactionPolicy>,
     next_synthetic_id: AtomicU64,
 }
 
-impl<W: Write> SpanSpectorLayer<W> {
+impl<W: RecordWriter> SpanSpectorLayer<W> {
     /// Create a layer that writes records for one run to `writer`.
-    pub fn new(run: RunMetadata, writer: Arc<Mutex<W>>) -> Self {
+    pub fn new(run: RunMetadata, writer: W) -> Self {
         Self {
             run: Arc::new(run),
             writer,
             emit_span_started: false,
+            redaction: Arc::new(RedactionPolicy::new()),
             next_synthetic_id: AtomicU64::new(1),
         }
     }
@@ -95,6 +105,21 @@ impl<W: Write> SpanSpectorLayer<W> {
         self
     }
 
+    /// Use a custom [`RedactionPolicy`] for field redaction.
+    ///
+    /// The built-in sensitive keys always stay active; the policy only adds
+    /// domain-specific keys on top (for example a database service redacting
+    /// `sql.literal` or `connection_string`).
+    #[must_use]
+    pub fn with_redaction(mut self, policy: RedactionPolicy) -> Self {
+        self.redaction = Arc::new(policy);
+        self
+    }
+
+    fn collector(&self) -> FieldCollector {
+        FieldCollector::new(Arc::clone(&self.redaction))
+    }
+
     /// Serialize and write one record, best-effort.
     fn write_record(&self, event: TraceEvent) {
         let record = TraceRecord::new((*self.run).clone(), event);
@@ -103,9 +128,7 @@ impl<W: Write> SpanSpectorLayer<W> {
         let Ok(line) = to_jsonl_line(&record) else {
             return;
         };
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = writer.write_all(line.as_bytes());
-        }
+        self.writer.write_line(&line);
     }
 
     fn synthetic_id(&self) -> String {
@@ -117,7 +140,7 @@ impl<W: Write> SpanSpectorLayer<W> {
 impl<S, W> Layer<S> for SpanSpectorLayer<W>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
-    W: Write + 'static,
+    W: RecordWriter,
 {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else {
@@ -137,7 +160,7 @@ where
             .next()
             .map_or_else(|| span_id.clone(), |root| root.id().into_u64().to_string());
 
-        let mut collector = FieldCollector::default();
+        let mut collector = self.collector();
         attrs.record(&mut collector);
 
         let state = SpanState {
@@ -172,14 +195,14 @@ where
         let Some(state) = extensions.get_mut::<SpanState>() else {
             return;
         };
-        let mut collector = FieldCollector::default();
+        let mut collector = self.collector();
         values.record(&mut collector);
         collector.merge_into(&mut state.fields);
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let metadata = event.metadata();
-        let mut collector = FieldCollector::default();
+        let mut collector = self.collector();
         event.record(&mut collector);
         let fields = collector.into_fields();
 

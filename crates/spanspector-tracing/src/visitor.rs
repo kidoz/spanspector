@@ -9,17 +9,31 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::sync::Arc;
 
-use spanspector_schema::{FieldValue, redact_field_value};
+use spanspector_core::RedactionPolicy;
+use spanspector_schema::{FieldValue, redact_field_value_with};
 use tracing_core::Field;
 
 /// Collects visited tracing fields into a redacted, deterministically ordered map.
-#[derive(Debug, Default)]
+///
+/// Holds the active [`RedactionPolicy`] so every captured value is redacted with
+/// the same rules — built-in sensitive keys plus any the policy adds.
+#[derive(Debug)]
 pub(crate) struct FieldCollector {
     fields: BTreeMap<String, FieldValue>,
+    redaction: Arc<RedactionPolicy>,
 }
 
 impl FieldCollector {
+    /// Create a collector that redacts with `redaction`.
+    pub(crate) fn new(redaction: Arc<RedactionPolicy>) -> Self {
+        Self {
+            fields: BTreeMap::new(),
+            redaction,
+        }
+    }
+
     /// Consume the collector and return the captured fields.
     pub(crate) fn into_fields(self) -> BTreeMap<String, FieldValue> {
         self.fields
@@ -35,7 +49,7 @@ impl FieldCollector {
         // Key-based redaction: textual values under sensitive keys never survive.
         self.fields.insert(
             field.name().to_owned(),
-            redact_field_value(field.name(), value),
+            redact_field_value_with(&self.redaction, field.name(), value),
         );
     }
 
@@ -91,9 +105,13 @@ mod tests {
     // metadata is heavy; instead we exercise the collector through a real
     // subscriber in the layer integration tests. Here we only assert the map
     // shape using the public `into_fields`.
+    fn test_collector() -> FieldCollector {
+        FieldCollector::new(Arc::new(RedactionPolicy::new()))
+    }
+
     #[test]
     fn empty_collector_yields_no_fields() {
-        let collector = FieldCollector::default();
+        let collector = test_collector();
         assert!(collector.into_fields().is_empty());
     }
 
@@ -103,7 +121,7 @@ mod tests {
         target.insert("a".to_owned(), FieldValue::Bool(true));
         // We cannot easily fabricate a Field here, so just confirm merge of an
         // empty collector preserves the target.
-        let collector = FieldCollector::default();
+        let collector = test_collector();
         collector.merge_into(&mut target);
         assert_eq!(target.len(), 1);
     }
