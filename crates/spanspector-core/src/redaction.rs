@@ -70,9 +70,22 @@ pub struct RedactedValue {
 
 impl RedactedValue {
     /// Build a redacted representation from a field key and raw string value.
+    ///
+    /// The class is inferred from `key` with the built-in classifier. To honor a
+    /// caller-supplied [`RedactionPolicy`] (with extra keys), prefer
+    /// [`RedactionPolicy::redacted_value`].
     pub fn new(key: &str, value: &str) -> Self {
+        Self::with_class(classify_sensitive_key(key), value)
+    }
+
+    /// Build a redacted representation with an explicit [`SensitiveClass`].
+    ///
+    /// Used when the class is decided by a [`RedactionPolicy`] rather than the
+    /// built-in key classifier. The raw `value` is still never stored — only its
+    /// length and digest.
+    pub fn with_class(class: SensitiveClass, value: &str) -> Self {
         Self {
-            class: classify_sensitive_key(key),
+            class,
             present: true,
             redacted: true,
             size_bytes: value.len(),
@@ -81,9 +94,117 @@ impl RedactedValue {
     }
 }
 
+/// An extensible classifier for sensitive field keys.
+///
+/// The built-in sensitive key parts are always active; a policy layers
+/// **additional** key substrings on top so a downstream service can redact
+/// domain-specific fields the core list does not know about — for example a
+/// database server adding `sql.literal`, `connection_string`, `admin_token`, or
+/// `encryption_key_alias`. Extra keys are matched against the same normalized key
+/// form as the defaults, so separators (`.`, `-`, camelCase) cannot smuggle a
+/// value past them.
+///
+/// A policy never *removes* a built-in sensitive key: extensions can only widen
+/// what is redacted, never narrow it.
+///
+/// ```
+/// use spanspector_core::{RedactionPolicy, SensitiveClass};
+///
+/// let policy = RedactionPolicy::new()
+///     .with_key("sql.literal", SensitiveClass::Secret)
+///     .with_key("connection_string", SensitiveClass::ConnectionString);
+///
+/// assert!(policy.is_sensitive_key("query.sql.literal"));
+/// assert_eq!(
+///     policy.classify_sensitive_key("db.connection-string"),
+///     SensitiveClass::ConnectionString,
+/// );
+/// // Built-in keys still redact under any policy.
+/// assert!(policy.is_sensitive_key("auth.token"));
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct RedactionPolicy {
+    /// `(normalized substring, class)` pairs added on top of the defaults.
+    extra: Vec<(String, SensitiveClass)>,
+}
+
+impl RedactionPolicy {
+    /// Create a policy with only the built-in sensitive keys active.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one extra sensitive key substring with the class to report for it.
+    ///
+    /// The substring is normalized the same way keys are, so `"SQL.Literal"` and
+    /// `"sql_literal"` register the same matcher.
+    #[must_use]
+    pub fn with_key(mut self, substring: impl AsRef<str>, class: SensitiveClass) -> Self {
+        let normalized = normalize_key(substring.as_ref());
+        if !normalized.is_empty() {
+            self.extra.push((normalized, class));
+        }
+        self
+    }
+
+    /// Add many extra `(substring, class)` sensitive keys at once.
+    #[must_use]
+    pub fn with_keys<I, S>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = (S, SensitiveClass)>,
+        S: AsRef<str>,
+    {
+        for (substring, class) in keys {
+            self = self.with_key(substring, class);
+        }
+        self
+    }
+
+    /// Return true when `key` is sensitive under the defaults or any extra key.
+    #[must_use]
+    pub fn is_sensitive_key(&self, key: &str) -> bool {
+        let normalized = normalize_key(key);
+        default_is_sensitive(&normalized) || self.matches_extra(&normalized).is_some()
+    }
+
+    /// Classify `key`, preferring an extra-key class over the built-in inference.
+    ///
+    /// Extra keys win so a downstream caller can label, say, `sql.literal` as
+    /// [`SensitiveClass::Secret`] even though the built-in classifier would never
+    /// have flagged it.
+    #[must_use]
+    pub fn classify_sensitive_key(&self, key: &str) -> SensitiveClass {
+        let normalized = normalize_key(key);
+        if let Some(class) = self.matches_extra(&normalized) {
+            return class;
+        }
+        classify_normalized(&normalized)
+    }
+
+    /// Build a [`RedactedValue`] for `key`/`value` using this policy's class.
+    #[must_use]
+    pub fn redacted_value(&self, key: &str, value: &str) -> RedactedValue {
+        RedactedValue::with_class(self.classify_sensitive_key(key), value)
+    }
+
+    fn matches_extra(&self, normalized: &str) -> Option<SensitiveClass> {
+        self.extra
+            .iter()
+            .find(|(part, _)| normalized.contains(part.as_str()))
+            .map(|(_, class)| *class)
+    }
+}
+
 /// Return true when a field key must not be serialized with a raw value.
+///
+/// Uses the built-in key list only. For extensible classification, build a
+/// [`RedactionPolicy`].
 pub fn is_sensitive_key(key: &str) -> bool {
-    let normalized = normalize_key(key);
+    default_is_sensitive(&normalize_key(key))
+}
+
+fn default_is_sensitive(normalized: &str) -> bool {
     SENSITIVE_KEY_PARTS
         .iter()
         .any(|part| normalized.contains(part))
@@ -95,8 +216,10 @@ pub fn is_sensitive_key(key: &str) -> bool {
 /// key, connection string) are tested before the broad token class so a key like
 /// `session_token` classifies as a cookie/session rather than a generic token.
 pub fn classify_sensitive_key(key: &str) -> SensitiveClass {
-    let normalized = normalize_key(key);
+    classify_normalized(&normalize_key(key))
+}
 
+fn classify_normalized(normalized: &str) -> SensitiveClass {
     if normalized.contains("password") || normalized.contains("passphrase") {
         SensitiveClass::Password
     } else if normalized.contains("private_key") {
@@ -188,5 +311,48 @@ mod tests {
         let first = RedactedValue::new("password", "same-secret");
         let second = RedactedValue::new("password", "same-secret");
         assert_eq!(first.digest, second.digest);
+    }
+
+    #[test]
+    fn policy_adds_extra_keys_without_dropping_builtins() {
+        let policy = RedactionPolicy::new()
+            .with_key("sql.literal", SensitiveClass::Secret)
+            .with_key("admin_token", SensitiveClass::Token);
+
+        // Extra keys redact, with separator normalization.
+        assert!(policy.is_sensitive_key("query.sql-literal"));
+        assert_eq!(
+            policy.classify_sensitive_key("request.admin.token"),
+            SensitiveClass::Token
+        );
+        // Built-in keys still redact under any policy.
+        assert!(policy.is_sensitive_key("auth.token"));
+        // An unrelated key remains non-sensitive.
+        assert!(!policy.is_sensitive_key("order.id"));
+    }
+
+    #[test]
+    fn policy_extra_class_wins_over_builtin_inference() {
+        // `connection_string` is not a built-in part, so the default classifier
+        // would call it a generic secret; the policy pins it precisely.
+        let policy =
+            RedactionPolicy::new().with_key("connection_string", SensitiveClass::ConnectionString);
+        assert_eq!(
+            policy.classify_sensitive_key("db.connection-string"),
+            SensitiveClass::ConnectionString
+        );
+        assert!(
+            policy
+                .redacted_value("db.connection-string", "postgres://u:p@h/db")
+                .redacted
+        );
+    }
+
+    #[test]
+    fn default_policy_matches_free_functions() {
+        let policy = RedactionPolicy::new();
+        for key in ["password", "auth.token", "order.id", "input.class"] {
+            assert_eq!(policy.is_sensitive_key(key), is_sensitive_key(key));
+        }
     }
 }

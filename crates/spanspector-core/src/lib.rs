@@ -11,5 +11,7 @@ mod redaction;
 mod run;
 
 pub use digest::sha256_digest;
-pub use redaction::{RedactedValue, SensitiveClass, classify_sensitive_key, is_sensitive_key};
+pub use redaction::{
+    RedactedValue, RedactionPolicy, SensitiveClass, classify_sensitive_key, is_sensitive_key,
+};
 pub use run::RunMetadata;

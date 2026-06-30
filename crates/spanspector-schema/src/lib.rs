@@ -38,9 +38,9 @@ pub use event::{
 };
 pub use jsonl::{JsonlLine, from_jsonl_line, read_jsonl, to_jsonl_line};
 pub use record::{SCHEMA_VERSION, TraceRecord};
-pub use redact::{redact_field_value, redact_fields};
+pub use redact::{redact_field_value, redact_field_value_with, redact_fields};
 pub use summary::{DEFAULT_SLOWEST_SPANS, RunSummary, SpanTiming};
 
 // Re-export the core types that appear in this crate's public API so downstream
 // crates can use the schema without naming `spanspector-core` directly.
-pub use spanspector_core::{RedactedValue, RunMetadata, SensitiveClass};
+pub use spanspector_core::{RedactedValue, RedactionPolicy, RunMetadata, SensitiveClass};

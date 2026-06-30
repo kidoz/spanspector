@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use spanspector_core::{RedactedValue, is_sensitive_key};
+use spanspector_core::{RedactedValue, RedactionPolicy, is_sensitive_key};
 
 use crate::event::FieldValue;
 
@@ -24,6 +24,27 @@ use crate::event::FieldValue;
 pub fn redact_field_value(key: &str, value: &str) -> FieldValue {
     if is_sensitive_key(key) {
         FieldValue::Redacted(RedactedValue::new(key, value))
+    } else {
+        FieldValue::Text(value.to_owned())
+    }
+}
+
+/// Redact a single string field value using an explicit [`RedactionPolicy`].
+///
+/// Behaves like [`redact_field_value`] but also honors any extra sensitive keys
+/// the policy carries, so a downstream service can redact domain-specific fields.
+///
+/// ```
+/// use spanspector_core::{RedactionPolicy, SensitiveClass};
+/// use spanspector_schema::{FieldValue, redact_field_value_with};
+///
+/// let policy = RedactionPolicy::new().with_key("sql.literal", SensitiveClass::Secret);
+/// let redacted = redact_field_value_with(&policy, "query.sql.literal", "DROP TABLE t");
+/// assert!(matches!(redacted, FieldValue::Redacted(_)));
+/// ```
+pub fn redact_field_value_with(policy: &RedactionPolicy, key: &str, value: &str) -> FieldValue {
+    if policy.is_sensitive_key(key) {
+        FieldValue::Redacted(policy.redacted_value(key, value))
     } else {
         FieldValue::Text(value.to_owned())
     }
